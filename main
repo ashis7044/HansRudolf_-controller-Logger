@@ -1,0 +1,614 @@
+"""
+Hans-Rudolph Communication Library (Python Port)
+
+This module provides communication functions for Hans-Rudolph devices.
+Ported from Ruby to Python with enhanced documentation and error handling.
+
+@author: Automation Testing Scripts
+@date: July 21, 2025
+@version: 1.0
+"""
+
+import time
+import sys
+from typing import List, Tuple, Optional, Any, Union, TextIO
+
+
+class HansRudolphComm:
+    """
+    Hans-Rudolph Communication Class
+    
+    This class provides methods for communicating with Hans-Rudolph devices
+    including data collection, command sending, and configuration management.
+    
+    @since 1.0
+    """
+    
+    def __init__(self):
+        """
+        Initialize the Hans-Rudolph Communication instance.
+        
+        @since 1.0
+        """
+        # Default labels for graph channels
+        self.default_labels = [
+            "1", "2", "3", "4", 
+            "Vol. Flow (LPM)", "Pressure cmH2O", "Volume (ml)"
+        ]
+    
+    def hans_put_char(self, port, c: int) -> Optional[int]:
+        """
+        Send a character to the Hans-Rudolph device and read response.
+        
+        @param port: Serial port object for communication
+        @param c: Character code to send (as integer)
+        @return: Response character code or None if no response
+        @throws Exception: If communication fails
+        @since 1.0
+        """
+        try:
+            # Convert integer to character and write to port
+            port.write(chr(c).encode())
+            
+            # Read response
+            response = port.read(1)
+            if response:
+                return response[0] if isinstance(response, bytes) else ord(response)
+            return None
+        except Exception as e:
+            print(f"Error in hans_put_char: {e}")
+            return None
+    
+    def hans_read_bytes(self, port, num: int = 2) -> int:
+        """
+        Read specified number of bytes from port and convert to integer.
+        
+        Reads bytes in little-endian format and converts to a single integer value.
+        
+        @param port: Serial port object for communication
+        @param num: Number of bytes to read (default: 2)
+        @return: Integer value constructed from bytes
+        @throws Exception: If read operation fails
+        @since 1.0
+        """
+        try:
+            # Read bytes into array
+            byte_array = []
+            for i in range(num):
+                byte_data = port.read(1)
+                if byte_data:
+                    byte_array.append(byte_data[0] if isinstance(byte_data, bytes) else ord(byte_data))
+                else:
+                    byte_array.append(0)
+            
+            # Convert to hex string (reversed order for little-endian)
+            hex_string = ""
+            for i in range(num - 1, -1, -1):
+                hex_string += f"{byte_array[i]:02X}"
+            
+            # Convert hex string to integer
+            return int(hex_string, 16)
+        except Exception as e:
+            print(f"Error in hans_read_bytes: {e}")
+            return 0
+    
+    def hans_read_4_bytes(self, port) -> int:
+        """
+        Read 4 bytes from port and convert to integer.
+        
+        @param port: Serial port object for communication
+        @return: Integer value from 4 bytes
+        @since 1.0
+        """
+        return self.hans_read_bytes(port, 4)
+    
+    def read_2_bytes(self, port) -> int:
+        """
+        Read 2 bytes from port and convert to integer.
+        
+        @param port: Serial port object for communication
+        @return: Integer value from 2 bytes
+        @since 1.0
+        """
+        return self.hans_read_bytes(port, 2)
+    
+    def hans_read_packet_8(self, port) -> Tuple[int, str, str]:
+        """
+        Read packet type 8 (configuration/label packet) from Hans-Rudolph device.
+        
+        This packet contains channel names and labels for the graphing channels.
+        
+        @param port: Serial port object for communication
+        @return: Tuple containing (channel_index, channel_name, channel_label)
+        @throws Exception: If packet read fails
+        @since 1.0
+        """
+        try:
+            # Initialize default names and labels
+            names = ["1", "2", "3", "4", "VFLOW", "PRESS", "VOLUME"]
+            labels = ["1", "2", "3", "4", "Vol. Flow (LPM)", "Pressure cmH2O", "Volume (ml)"]
+            
+            # Read 38-byte packet
+            packet = port.read(38)
+            if not packet or len(packet) < 38:
+                return (0, names[0], labels[0])
+            
+            # Extract channel index
+            channel_idx = packet[0] if isinstance(packet, bytes) else ord(packet[0])
+            
+            # Extract channel name and label for channels 0-3
+            if channel_idx < 4:
+                # Extract name (bytes 9-17)
+                name = ""
+                for i in range(9, 18):
+                    if i < len(packet):
+                        char_val = packet[i] if isinstance(packet, bytes) else ord(packet[i])
+                        if char_val == 0:
+                            break
+                        name += chr(char_val)
+                names[channel_idx] = name
+                
+                # Extract label (bytes 18-37)
+                label = ""
+                for i in range(18, 38):
+                    if i < len(packet):
+                        char_val = packet[i] if isinstance(packet, bytes) else ord(packet[i])
+                        if char_val == 0:
+                            break
+                        label += chr(char_val)
+                labels[channel_idx] = label
+            
+            return (channel_idx, names[channel_idx], labels[channel_idx])
+        except Exception as e:
+            print(f"Error in hans_read_packet_8: {e}")
+            return (0, "Error", "Error")
+    
+    def hans_get_graph_data_value(self, packet: bytes, offset: int) -> float:
+        """
+        Extract and convert graph data value from packet.
+        
+        Converts 4-byte little-endian signed integer to float with proper scaling.
+        
+        @param packet: Byte packet containing data
+        @param offset: Starting offset in packet
+        @return: Converted float value
+        @since 1.0
+        """
+        try:
+            # Extract 4 bytes starting at offset
+            val = 0
+            for i in range(4):
+                if (offset + i) < len(packet):
+                    if isinstance(packet, bytes):
+                        byte_val = packet[offset + i]
+                    else:
+                        # packet is string-like, get character and convert to ord
+                        byte_val = ord(str(packet[offset + i]))
+                    val += byte_val << (i * 8)
+            
+            # Convert from unsigned to signed (24-bit offset)
+            val -= 8388608
+            
+            # Scale to proper float value
+            return float(val) / 1000.0
+        except Exception as e:
+            print(f"Error in hans_get_graph_data_value: {e}")
+            return 0.0
+    
+    def hans_get_def_data_value(self, packet: bytes, offset: int, special_precision: int = 0) -> float:
+        """
+        Extract and convert default data value from packet.
+        
+        Converts 2-byte little-endian signed integer to float with scaling.
+        
+        @param packet: Byte packet containing data
+        @param offset: Starting offset in packet
+        @param special_precision: If 1, divide by 10; otherwise divide by 100
+        @return: Converted float value
+        @since 1.0
+        """
+        try:
+            # Extract 2 bytes starting at offset  
+            val = 0
+            for i in range(2):
+                if (offset + i) < len(packet):
+                    if isinstance(packet, bytes):
+                        byte_val = packet[offset + i]
+                    else:
+                        # Handle string/other types by converting to integer
+                        packet_item = packet[offset + i]
+                        byte_val = packet_item if isinstance(packet_item, int) else ord(str(packet_item))
+                    val += byte_val << (i * 8)
+            
+            # Convert from unsigned to signed (16-bit offset)
+            val -= 32768
+            
+            # Apply scaling based on precision flag
+            if special_precision == 1:
+                return float(val) / 10.0
+            else:
+                return float(val) / 100.0
+        except Exception as e:
+            print(f"Error in hans_get_def_data_value: {e}")
+            return 0.0
+    
+    def hans_read_packet_2(self, port) -> List[float]:
+        """
+        Read packet type 2 (data packet) from Hans-Rudolph device.
+        
+        This packet contains the main measurement data including graph values,
+        flow, pressure, and volume measurements.
+        
+        @param port: Serial port object for communication
+        @return: List of 7 float values [g1, g2, g3, g4, flow, pressure, volume]
+        @throws Exception: If packet read fails
+        @since 1.0
+        """
+        try:
+            # Read 22-byte data packet
+            packet = port.read(22)
+            if not packet or len(packet) < 22:
+                return [0.0] * 7
+            
+            # Extract graph values (4 bytes each)
+            g1 = self.hans_get_graph_data_value(packet, 0)
+            g2 = self.hans_get_graph_data_value(packet, 4)
+            g3 = self.hans_get_graph_data_value(packet, 8)
+            g4 = self.hans_get_graph_data_value(packet, 12)
+            
+            # Extract flow and pressure (2 bytes each)
+            flow = self.hans_get_def_data_value(packet, 16)
+            pressure = self.hans_get_def_data_value(packet, 18)
+            
+            # Extract volume (2 bytes, special precision)
+            volume = self.hans_get_def_data_value(packet, 20, 1)
+            
+            return [g1, g2, g3, g4, flow, pressure, volume]
+        except Exception as e:
+            print(f"Error in hans_read_packet_2: {e}")
+            return [0.0] * 7
+    
+    def hans_save_packet_2(self, file_obj: TextIO, data: List[float], time_elapsed: float, wall_time: float) -> None:
+        """
+        Save packet data to file in CSV format.
+        
+        @param file_obj: File object to write to
+        @param data: List of measurement values
+        @param time_elapsed: Elapsed time since start
+        @param wall_time: Wall clock time
+        @since 1.0
+        """
+        try:
+            # Write elapsed time
+            file_obj.write(f"{time_elapsed:.4f}")
+            
+            # Write data values
+            for value in data:
+                file_obj.write(f",{value}")
+            
+            # Write wall time and newline
+            file_obj.write(f",{wall_time:.4f}\n")
+        except Exception as e:
+            print(f"Error in hans_save_packet_2: {e}")
+    
+    def hans_open_port(self, com_name: str):
+        """
+        Open serial port for Hans-Rudolph communication.
+        
+        Note: This method requires implementation of openPort function
+        which should handle serial port initialization at 19200 baud.
+        
+        @param com_name: Serial port name (e.g., "COM1", "/dev/ttyUSB0")
+        @return: Serial port object
+        @throws Exception: If port opening fails
+        @since 1.0
+        """
+        # This would need to be implemented with actual serial library
+        # return openPort(com_name, 19200)
+        raise NotImplementedError("Serial port implementation required")
+    
+    def hans_get_row(self, port, timeout: int = 10) -> Optional[List[float]]:
+        """
+        Get a single row of data from Hans-Rudolph device.
+        
+        Waits for data packet and returns measurement values.
+        
+        @param port: Serial port object for communication
+        @param timeout: Timeout in seconds (default: 10)
+        @return: List of measurement values or None if timeout
+        @throws Exception: If communication fails
+        @since 1.0
+        """
+        try:
+            start_time = time.time()
+            
+            while (time.time() - start_time) < timeout:
+                # Look for packet start marker (@)
+                while (time.time() - start_time) < timeout:
+                    byte_data = port.read(1)
+                    if not byte_data:
+                        continue
+                    x = byte_data[0] if isinstance(byte_data, bytes) else ord(byte_data)
+                    if x == 0x40:  # Found '@' marker
+                        break
+                else:
+                    break  # Timeout looking for marker
+                
+                # Read packet type
+                byte_data = port.read(1)
+                if not byte_data:
+                    continue
+                x = byte_data[0] if isinstance(byte_data, bytes) else ord(byte_data)
+                
+                if x == 0x08:
+                    # Configuration packet - read and continue
+                    self.hans_read_packet_8(port)
+                elif x == 0x02:
+                    # Data packet - read and return
+                    data = self.hans_read_packet_2(port)
+                    return data
+            
+            return None  # Timeout
+        except Exception as e:
+            print(f"Error in hans_get_row: {e}")
+            return None
+    
+    def hans_start_data_output(self, port) -> None:
+        """
+        Start data output from Hans-Rudolph device.
+        
+        Sends command sequence to begin continuous data transmission.
+        
+        @param port: Serial port object for communication
+        @throws Exception: If command transmission fails
+        @since 1.0
+        """
+        try:
+            self.hans_put_char(port, ord('@'))
+            self.hans_put_char(port, 3)
+            self.hans_put_char(port, 1)
+            self.hans_put_char(port, 13)
+        except Exception as e:
+            print(f"Error in hans_start_data_output: {e}")
+    
+    def start_hans_data_collection(self, port, duration: int = 300, 
+                                   file_obj: TextIO = sys.stdout, 
+                                   need_header: bool = True) -> None:
+        """
+        Start comprehensive data collection from Hans-Rudolph device.
+        
+        Collects data for specified duration and writes to file in CSV format.
+        Handles both configuration and data packets automatically.
+        
+        @param port: Serial port object for communication
+        @param duration: Collection duration in seconds (default: 300)
+        @param file_obj: File object to write data (default: stdout)
+        @param need_header: Whether to write CSV header (default: True)
+        @throws Exception: If data collection fails
+        @since 1.0
+        """
+        try:
+            # Initialize labels
+            labels = self.default_labels.copy()
+            
+            # Start data output
+            self.hans_start_data_output(port)
+            
+            start_time = time.time()
+            last_output = start_time
+            header_needed = need_header
+            
+            while True:
+                current_time = time.time()
+                
+                # Progress indicator every 10 seconds
+                if (current_time - last_output) > 10:
+                    print("*", end="", flush=True)
+                    last_output = current_time
+                
+                elapsed = current_time - start_time
+                
+                # Check for completion (with 5-second buffer)
+                if elapsed > (duration + 5):
+                    break
+                
+                # Look for packet start marker
+                while True:
+                    byte_data = port.read(1)
+                    if not byte_data:
+                        continue
+                    x = byte_data[0] if isinstance(byte_data, bytes) else ord(byte_data)
+                    if x == 0x40:  # Found '@'
+                        break
+                
+                # Read packet type
+                byte_data = port.read(1)
+                if not byte_data:
+                    continue
+                x = byte_data[0] if isinstance(byte_data, bytes) else ord(byte_data)
+                
+                if x == 0x08:
+                    # Configuration packet
+                    config_data = self.hans_read_packet_8(port)
+                    labels[config_data[0]] = config_data[2]
+                    header_needed = True
+                elif x == 0x02:
+                    # Data packet
+                    if header_needed:
+                        # Write CSV header
+                        file_obj.write("Time")
+                        for i in range(7):
+                            file_obj.write(f",{labels[i]}")
+                        file_obj.write(",Wall\n")
+                        header_needed = False
+                    
+                    # Read and save data
+                    data = self.hans_read_packet_2(port)
+                    self.hans_save_packet_2(file_obj, data, elapsed, current_time)
+            
+            print()  # New line after progress indicators
+        except Exception as e:
+            print(f"Error in start_hans_data_collection: {e}")
+    
+    def hans_stop_data_output(self, port) -> None:
+        """
+        Stop data output from Hans-Rudolph device.
+        
+        Sends stop command and clears any remaining data from buffer.
+        
+        @param port: Serial port object for communication
+        @throws Exception: If command transmission fails
+        @since 1.0
+        """
+        try:
+            # Send stop command
+            self.hans_put_char(port, ord('@'))
+            self.hans_put_char(port, 3)
+            self.hans_put_char(port, 0)
+            self.hans_put_char(port, 13)
+            
+            # Clear remaining data from buffer
+            for _ in range(80):
+                data = port.read(1)
+                if not data or len(data) == 0:
+                    break
+        except Exception as e:
+            print(f"Error in hans_stop_data_output: {e}")
+    
+    def hans_clear_the_port(self, port) -> None:
+        """
+        Clear the serial port buffer.
+        
+        Sends carriage return and reads all available data to clear buffers.
+        
+        @param port: Serial port object for communication
+        @throws Exception: If port clearing fails
+        @since 1.0
+        """
+        try:
+            # Send carriage return
+            port.write(b'\r')
+            
+            # Read all available data with timeout
+            import time
+            timeout = 0.5  # 500ms timeout
+            start_time = time.time()
+            while (time.time() - start_time) < timeout:
+                data = port.read(port.in_waiting or 1)
+                if not data:
+                    break
+        except Exception as e:
+            print(f"Error in hans_clear_the_port: {e}")
+    
+    def hans_send_command(self, port, command: str) -> int:
+        """
+        Send command string to Hans-Rudolph device.
+        
+        @param port: Serial port object for communication
+        @param command: Command string to send
+        @return: 0 on success, -1 on failure
+        @throws Exception: If command transmission fails
+        @since 1.0
+        """
+        try:
+            # Clear port buffer first
+            self.hans_clear_the_port(port)
+            
+            # Send command string
+            port.write(command.encode('ascii'))
+            
+            # Send carriage return
+            port.write(b'\r')
+            
+            # Wait a moment for device to process
+            import time
+            time.sleep(0.1)
+            
+            # Read any response (optional - some commands may not respond)
+            try:
+                timeout = 0.5  # 500ms timeout for response
+                start_time = time.time()
+                while (time.time() - start_time) < timeout:
+                    data = port.read(port.in_waiting or 1)
+                    if not data:
+                        break
+            except:
+                pass  # Ignore read errors
+            
+            return 0
+        except Exception as e:
+            print(f"Error in hans_send_command: {e}")
+            return -1
+    
+    def load_configuration(self, port, filename: str) -> None:
+        """
+        Load configuration file on Hans-Rudolph device.
+        
+        @param port: Serial port object for communication
+        @param filename: Configuration filename to load
+        @throws Exception: If command fails
+        @since 1.0
+        """
+        self.hans_send_command(port, f"@I{filename}")
+    
+    def set_breath_rate(self, port, breath_rate: int) -> None:
+        """
+        Set breathing rate on Hans-Rudolph device.
+        
+        @param port: Serial port object for communication
+        @param breath_rate: Breathing rate (1-99 BPM)
+        @throws ValueError: If breath_rate is out of range
+        @since 1.0
+        """
+        if breath_rate < 1 or breath_rate > 99:
+            raise ValueError("Breath rate must be between 1 and 99")
+        
+        self.hans_send_command(port, f"@b{breath_rate}")
+    
+    def set_amplitude(self, port, amplitude: Union[int, float]) -> None:
+        """
+        Set amplitude on Hans-Rudolph device.
+        
+        @param port: Serial port object for communication
+        @param amplitude: Amplitude value to set
+        @throws Exception: If command fails
+        @since 1.0
+        """
+        self.hans_send_command(port, f"@a{amplitude}")
+    
+    def wait_for_breaths(self, port, num_breaths: int) -> None:
+        """
+        Wait for specified number of breaths before executing next command.
+        
+        The wait command pauses execution for the specified number of spontaneous 
+        breaths. The next command will be executed at the beginning of the breath
+        following the number of breaths specified.
+        
+        @param port: Serial port object for communication
+        @param num_breaths: Number of breaths to wait for
+        @throws ValueError: If num_breaths is invalid
+        @throws Exception: If command fails
+        @since 1.0
+        """
+        if num_breaths < 0:
+            raise ValueError("Number of breaths must be non-negative")
+        
+        self.hans_send_command(port, f"@w{num_breaths}")
+
+
+# Module-level convenience functions for backward compatibility
+def hans_put_char(port, c: int) -> Optional[int]:
+    """Module-level wrapper for hans_put_char method."""
+    return HansRudolphComm().hans_put_char(port, c)
+
+def hans_read_bytes(port, num: int = 2) -> int:
+    """Module-level wrapper for hans_read_bytes method."""
+    return HansRudolphComm().hans_read_bytes(port, num)
+
+def hans_read_4_bytes(port) -> int:
+    """Module-level wrapper for hans_read_4_bytes method."""
+    return HansRudolphComm().hans_read_4_bytes(port)
+
+def read_2_bytes(port) -> int:
+    """Module-level wrapper for read_2_bytes method."""
+    return HansRudolphComm().read_2_bytes(port)
